@@ -97,7 +97,7 @@ def _check_for_iscsi():
                     "Error: %s", e)
 
 
-def list_all_block_devices(block_type='disk'):
+def list_all_block_devices(block_type='disk', exclude_dependents=True):
     """List all physical block devices
 
     The switches we use for lsblk: P for KEY="value" output, b for size output
@@ -108,12 +108,17 @@ def list_all_block_devices(block_type='disk'):
     don't need to subclass GenericHardwareManager.
 
     :param block_type: Type of block device to find
+    :param exclude_dependents: If to exclude dependent devices
     :return: A list of BlockDevices
     """
     _udev_settle()
 
     columns = ['KNAME', 'MODEL', 'SIZE', 'ROTA', 'TYPE']
-    report = utils.execute('lsblk', '-Pbdi', '-o{}'.format(','.join(columns)),
+    lsblk_options = '-Pbi'
+    if exclude_dependents:
+        lsblk_options += 'd'
+    report = utils.execute('lsblk', lsblk_options,
+                           '-o{}'.format(','.join(columns)),
                            check_exit_code=[0])[0]
     lines = report.split('\n')
     context = pyudev.Context()
@@ -669,8 +674,12 @@ class GenericHardwareManager(HardwareManager):
 
         return Memory(total=total, physical_mb=physical)
 
-    def list_block_devices(self):
-        return list_all_block_devices()
+    def list_block_devices(self, include_partitions=False):
+        block_devices = list_all_block_devices()
+        if include_partitions:
+            block_devices += list_all_block_devices(block_type='part',
+                                                    exclude_dependents=False)
+        return block_devices
 
     def get_os_install_device(self):
         cached_node = get_cached_node()
@@ -778,7 +787,11 @@ class GenericHardwareManager(HardwareManager):
         :raises BlockDeviceEraseError: when there's an error erasing the
                 block device
         """
-        block_devices = self.list_block_devices()
+        block_devices = self.list_block_devices(include_partitions=True)
+        # NOTE(coreywright): reserve sort by device name so a partition (eg
+        # sda1) is processed before it disappears when its associated disk (eg
+        # sda) has its partition table erased
+        block_devices.sort(key=lambda dev: dev.name, reverse=True)
         erase_errors = {}
         for dev in block_devices:
             if self._is_virtual_media_device(dev):
