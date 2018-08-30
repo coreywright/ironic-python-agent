@@ -97,23 +97,29 @@ def _check_for_iscsi():
                     "Error: %s", e)
 
 
-def list_all_block_devices(block_type='disk'):
+def list_all_block_devices(block_type='disk', include_dependents=False):
     """List all physical block devices
 
     The switches we use for lsblk: P for KEY="value" output, b for size output
-    in bytes, d to exclude dependent devices (like md or dm devices), i to
-    ensure ascii characters only, and o to specify the fields/columns we need.
+    in bytes, d to exclude dependent devices (like md or dm devices and
+    partitions), i to ensure ascii characters only, and o to specify the
+    fields/columns we need.
 
     Broken out as its own function to facilitate custom hardware managers that
     don't need to subclass GenericHardwareManager.
 
     :param block_type: Type of block device to find
+    :param include_dependents: If to include dependent devices
     :return: A list of BlockDevices
     """
     _udev_settle()
 
     columns = ['KNAME', 'MODEL', 'SIZE', 'ROTA', 'TYPE']
-    report = utils.execute('lsblk', '-Pbdi', '-o{}'.format(','.join(columns)),
+    lsblk_options = '-Pbi'
+    if not include_dependents:
+        lsblk_options += 'd'
+    report = utils.execute('lsblk', lsblk_options,
+                           '-o{}'.format(','.join(columns)),
                            check_exit_code=[0])[0]
     lines = report.split('\n')
     context = pyudev.Context()
@@ -669,8 +675,14 @@ class GenericHardwareManager(HardwareManager):
 
         return Memory(total=total, physical_mb=physical)
 
-    def list_block_devices(self):
-        return list_all_block_devices()
+    def list_block_devices(self, include_partitions=False):
+        block_devices = list_all_block_devices()
+        if include_partitions:
+            block_devices.extend(
+                list_all_block_devices(block_type='part',
+                                       include_dependents=True)
+            )
+        return block_devices
 
     def get_os_install_device(self):
         cached_node = get_cached_node()
@@ -778,7 +790,11 @@ class GenericHardwareManager(HardwareManager):
         :raises BlockDeviceEraseError: when there's an error erasing the
                 block device
         """
-        block_devices = self.list_block_devices()
+        block_devices = self.list_block_devices(include_partitions=True)
+        # NOTE(coreywright): Reverse sort by device name so a partition (eg
+        # sda1) is processed before it disappears when its associated disk (eg
+        # sda) has its partition table erased and the kernel notified.
+        block_devices.sort(key=lambda dev: dev.name, reverse=True)
         erase_errors = {}
         for dev in block_devices:
             if self._is_virtual_media_device(dev):
